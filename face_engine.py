@@ -76,6 +76,8 @@ class FaceEngine:
         คืนค่า list ของ face object (มี .bbox, .embedding, .det_score)
         """
         faces = self.app.get(frame_bgr)
+        # กรองใบหน้าที่ความมั่นใจต่ำเกินไปออก
+        faces = [f for f in faces if f.det_score >= config.MIN_DET_SCORE]
         return faces
 
     @staticmethod
@@ -130,29 +132,115 @@ class FaceMatcher:
         return None, best_score
 
 
-def draw_face_box(frame, bbox, label, color=(0, 200, 0)):
+def assess_face_quality(frame_bgr, bbox):
     """
-    วาดกรอบสี่เหลี่ยม + ป้ายชื่อ (รองรับภาษาไทย) บนเฟรม
-    frame: numpy array BGR (จาก OpenCV) - แก้ไข in-place และคืนค่ากลับด้วย
+    ประเมินคุณภาพใบหน้าจากภาพและตำแหน่ง
+    คืนค่า dict: {"pass": bool, "reasons": list[str], "blur_score": float, "brightness": float, "face_size": int}
     """
     x1, y1, x2, y2 = [int(v) for v in bbox]
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    h, w = y2 - y1, x2 - x1
+    face_size = max(w, h)
+    
+    reasons = []
+    
+    if face_size < config.MIN_FACE_SIZE:
+        reasons.append("ใบหน้าเล็กเกินไป")
+        
+    # Crop face region
+    x1_c, y1_c = max(0, x1), max(0, y1)
+    face_img = frame_bgr[y1_c:y2, x1_c:x2]
+    
+    blur_score = 0.0
+    brightness = 0.0
+    
+    if face_img.size > 0:
+        gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        brightness = np.mean(gray)
+        
+        if blur_score < config.MIN_BLUR_THRESHOLD:
+            reasons.append("ภาพเบลอ")
+            
+        if brightness < config.MIN_BRIGHTNESS:
+            reasons.append("มืดเกินไป")
+        elif brightness > config.MAX_BRIGHTNESS:
+            reasons.append("สว่างเกินไป")
+            
+    is_pass = len(reasons) == 0
+    return {
+        "pass": is_pass,
+        "reasons": reasons,
+        "blur_score": blur_score,
+        "brightness": brightness,
+        "face_size": face_size
+    }
 
-    # วาดข้อความไทยด้วย PIL แล้ว paste กลับเป็น numpy/BGR
-    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil_img)
 
+def draw_face_box(frame, bbox, label, color=(0, 200, 0), status="ok"):
+    """
+    วาดกรอบใบหน้าแบบ Modern (มุมโค้ง) + ป้ายชื่อภาษาไทย บนเฟรม
+    status: 'ok' = สำเร็จ, 'duplicate' = สแกนแล้ว, 'unknown' = ไม่รู้จัก, 'low_quality' = คุณภาพต่ำ
+    """
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h_frame, w_frame = frame.shape[:2]
+    
+    # --- กรอบมุมโค้ง (Corner brackets) ---
+    corner_len = max(15, min(30, (x2 - x1) // 5))
+    thickness = 3
+    
+    # มุมบนซ้าย
+    cv2.line(frame, (x1, y1), (x1 + corner_len, y1), color, thickness)
+    cv2.line(frame, (x1, y1), (x1, y1 + corner_len), color, thickness)
+    # มุมบนขวา
+    cv2.line(frame, (x2, y1), (x2 - corner_len, y1), color, thickness)
+    cv2.line(frame, (x2, y1), (x2, y1 + corner_len), color, thickness)
+    # มุมล่างซ้าย
+    cv2.line(frame, (x1, y2), (x1 + corner_len, y2), color, thickness)
+    cv2.line(frame, (x1, y2), (x1, y2 - corner_len), color, thickness)
+    # มุมล่างขวา
+    cv2.line(frame, (x2, y2), (x2 - corner_len, y2), color, thickness)
+    cv2.line(frame, (x2, y2), (x2, y2 - corner_len), color, thickness)
+    
+    # --- Status icon ---
+    icon = {"ok": "✓", "duplicate": "↻", "unknown": "?", "low_quality": "⚠"}.get(status, "")
+    display_label = f"{icon} {label}" if icon else label
+    
+    # --- ป้ายชื่อภาษาไทย (แปลงเฉพาะ region ไม่ใช่ทั้งเฟรม) ---
     try:
-        text_bbox = draw.textbbox((0, 0), label, font=_THAI_FONT)
-        text_w = text_bbox[2] - text_bbox[0]
-        text_h = text_bbox[3] - text_bbox[1]
+        text_bbox_result = _get_text_size(display_label)
+        text_w, text_h = text_bbox_result
     except Exception:
-        text_w, text_h = len(label) * 10, 20
-
-    label_y1 = max(0, y2 - text_h - 8)
-    draw.rectangle([x1, label_y1, x1 + text_w + 8, y2], fill=(color[2], color[1], color[0]))
-    draw.text((x1 + 4, label_y1 + 2), label, font=_THAI_FONT, fill=(255, 255, 255))
-
-    result = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    frame[:, :, :] = result
+        text_w, text_h = len(display_label) * 12, 24
+    
+    padding = 6
+    label_h = text_h + padding * 2
+    label_w = text_w + padding * 2
+    label_y1 = max(0, y1 - label_h - 4)
+    label_x1 = max(0, x1)
+    label_x2 = min(w_frame, label_x1 + label_w)
+    label_y2 = label_y1 + label_h
+    
+    # สร้าง overlay เฉพาะ region ป้ายชื่อ
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (label_x1, label_y1), (label_x2, label_y2), color, -1)
+    cv2.addWeighted(overlay[label_y1:label_y2, label_x1:label_x2], 0.85,
+                    frame[label_y1:label_y2, label_x1:label_x2], 0.15, 0,
+                    frame[label_y1:label_y2, label_x1:label_x2])
+    
+    # วาดข้อความไทยด้วย PIL เฉพาะ region
+    region = frame[label_y1:label_y2, label_x1:label_x2]
+    if region.size > 0:
+        pil_region = Image.fromarray(cv2.cvtColor(region, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_region)
+        draw.text((padding, padding - 2), display_label, font=_THAI_FONT, fill=(255, 255, 255))
+        frame[label_y1:label_y2, label_x1:label_x2] = cv2.cvtColor(np.array(pil_region), cv2.COLOR_RGB2BGR)
+    
     return frame
+
+
+def _get_text_size(text):
+    """คำนวณขนาดข้อความโดยไม่ต้องสร้างภาพเต็ม"""
+    dummy = Image.new('RGB', (1, 1))
+    draw = ImageDraw.Draw(dummy)
+    text_bbox = draw.textbbox((0, 0), text, font=_THAI_FONT)
+    return text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]

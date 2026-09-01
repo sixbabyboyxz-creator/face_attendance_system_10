@@ -19,6 +19,14 @@ import queue
 import database
 import face_engine
 import config
+from sound_manager import sound
+
+
+class ScanResult:
+    SUCCESS = "success"
+    DUPLICATE = "duplicate"
+    UNKNOWN = "unknown"
+    LOW_QUALITY = "low_quality"
 
 
 class AttendanceWorker:
@@ -60,6 +68,8 @@ class AttendanceWorker:
 
     def _loop(self):
         last_detect_time = 0.0
+        self._consecutive_errors = 0
+        last_cleanup_time = 0.0
         scan_label = "เข้า" if self.scan_type == "in" else "ออก"
         while self.running:
             now = time.time()
@@ -70,22 +80,47 @@ class AttendanceWorker:
                 continue
             last_detect_time = now
 
-            frame = self.camera.read()
-            if frame is None:
-                continue
+            # ทุก ~60 วินาที เคลียร์ข้อมูล cooldown เก่า
+            if now - last_cleanup_time > 60:
+                last_cleanup_time = now
+                if hasattr(config, 'CHECKIN_HISTORY_TTL_SEC'):
+                    cutoff = now - config.CHECKIN_HISTORY_TTL_SEC
+                else:
+                    cutoff = now - 3600  # Default 1 hour fallback
+                self.recent_checkins = {k: v for k, v in self.recent_checkins.items() if v > cutoff}
 
             try:
+                frame = self.camera.read()
+                if frame is None:
+                    self._consecutive_errors += 1
+                    if self._consecutive_errors > 30:  # ~9 seconds with no frames
+                        self.checkin_queue.put((None, 0, self.scan_type, "camera_error"))
+                        self._consecutive_errors = 0
+                    continue
+                self._consecutive_errors = 0
+                
                 faces = self.engine.detect_faces(frame)
-            except Exception:
-                faces = []
+            except Exception as e:
+                self._consecutive_errors += 1
+                time.sleep(0.5)
+                continue
 
             now = time.time()
+            faces.sort(key=lambda f: f.det_score, reverse=True)
             results = []
+            
             for face in faces:
+                quality_res = face_engine.assess_face_quality(frame, face.bbox)
+                if not quality_res["pass"]:
+                    reason = ", ".join(quality_res["reasons"])
+                    results.append({"bbox": face.bbox, "label": reason, "color": (0, 0, 255), "scan_result": ScanResult.LOW_QUALITY})
+                    continue
+
                 student_id, score = self.matcher.match(face.embedding)
 
                 if student_id is None:
-                    results.append({"bbox": face.bbox, "label": "ไม่รู้จัก", "color": (0, 0, 220)})
+                    sound.play_unknown()
+                    results.append({"bbox": face.bbox, "label": "ไม่รู้จัก", "color": (0, 0, 220), "scan_result": ScanResult.UNKNOWN})
                     continue
 
                 student = database.get_student_by_id(student_id)
@@ -95,14 +130,16 @@ class AttendanceWorker:
                     self.recent_checkins[student_id] = now
                     is_new = database.mark_attendance(self.event_id, student_id, score, scan_type=self.scan_type)
                     if is_new:
-                        self.checkin_queue.put((student, score, self.scan_type))
+                        sound.play_success()
+                        self.checkin_queue.put((student, score, self.scan_type, ScanResult.SUCCESS))
                         label = f"{student['full_name']} ({scan_label} {score * 100:.0f}%)"
-                        results.append({"bbox": face.bbox, "label": label, "color": (0, 200, 0)})
+                        results.append({"bbox": face.bbox, "label": label, "color": (0, 200, 0), "scan_result": ScanResult.SUCCESS})
                         continue
 
                 # สแกนซ้ำ (คูลดาวน์ยังไม่ครบ หรือสแกนประเภทนี้ไปแล้ว) แสดงกรอบสีเหลืองแทน
+                sound.play_duplicate()
                 label = f"{student['full_name']} (สแกนแล้ว)"
-                results.append({"bbox": face.bbox, "label": label, "color": (0, 165, 255)})
+                results.append({"bbox": face.bbox, "label": label, "color": (0, 165, 255), "scan_result": ScanResult.DUPLICATE})
 
             with self.result_lock:
                 self.latest_faces = results

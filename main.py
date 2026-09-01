@@ -2,9 +2,11 @@
 """
 main.py
 แอปพลิเคชันหลัก - ระบบเช็คชื่อเข้าร่วมกิจกรรมด้วยใบหน้า (Face Attendance System)
+Enterprise Edition — CustomTkinter Modern UI
+
 รันด้วยคำสั่ง: python main.py
 
-โครงสร้างหน้าจอ (Tab):
+โครงสร้างหน้าจอ (Sidebar Navigation):
   1. จัดการนักเรียน   - เพิ่ม/ลบนักเรียน + ลงทะเบียนใบหน้า (ถ่ายภาพจากกล้อง)
   2. จัดการกิจกรรม    - สร้าง/ลบกิจกรรม
   3. เช็คชื่อ         - เปิดกล้อง สแกนใบหน้าแบบเรียลไทม์ บันทึกลงฐานข้อมูล
@@ -17,8 +19,9 @@ import threading
 import shutil
 import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
+from tkinter import ttk, messagebox, filedialog
 
+import customtkinter as ctk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -31,6 +34,27 @@ import export_utils
 import detector_worker
 import import_utils
 
+# ============================================================================
+# ค่าคงที่ UI
+# ============================================================================
+SIDEBAR_WIDTH = 220
+PRIMARY_COLOR = "#2E5395"
+PRIMARY_DARK = "#1F3A6E"
+SUCCESS_COLOR = "#2E7D32"
+DANGER_COLOR = "#C62828"
+WARNING_COLOR = "#B36B00"
+MUTED_COLOR = "#888888"
+CARD_BG_LIGHT = "#F4F6FA"
+CARD_BG_DARK = "#2B2B2B"
+
+FONT_FAMILY = "Tahoma"
+FONT_BASE = (FONT_FAMILY, 12)
+FONT_BOLD = (FONT_FAMILY, 12, "bold")
+FONT_HEADER = (FONT_FAMILY, 16, "bold")
+FONT_BIG_NUM = (FONT_FAMILY, 28, "bold")
+FONT_SMALL = (FONT_FAMILY, 10)
+
+APP_VERSION = "2.0 Enterprise"
 
 # ============================================================================
 # หน้าต่างโหลดโมเดล (โมเดล InsightFace โหลดช้าตอนแรก ~5-15 วินาที)
@@ -56,12 +80,177 @@ class ModelLoader:
 
 
 # ============================================================================
+# Toast Notification System
+# ============================================================================
+
+class ToastManager:
+    """ระบบแจ้งเตือนแบบ Toast — แสดงข้อความชั่วคราวแล้วหายไป"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.toasts = []
+
+    def show(self, message, toast_type="info", duration=3000):
+        """แสดง toast notification
+        toast_type: 'success', 'warning', 'error', 'info'
+        """
+        colors = {
+            "success": ("#2E7D32", "#E8F5E9"),
+            "warning": ("#E65100", "#FFF3E0"),
+            "error": ("#C62828", "#FFEBEE"),
+            "info": ("#1565C0", "#E3F2FD"),
+        }
+        fg_color, bg_color = colors.get(toast_type, colors["info"])
+
+        icons = {"success": "✓", "warning": "⚠", "error": "✗", "info": "ℹ"}
+        icon = icons.get(toast_type, "ℹ")
+
+        toast = ctk.CTkFrame(self.parent, fg_color=bg_color, corner_radius=8, height=42)
+        toast.place(relx=1.0, y=10 + len(self.toasts) * 50, anchor="ne", x=-10)
+
+        label = ctk.CTkLabel(
+            toast, text=f"  {icon}  {message}  ",
+            text_color=fg_color,
+            font=FONT_BOLD,
+        )
+        label.pack(padx=12, pady=8)
+
+        self.toasts.append(toast)
+
+        def remove():
+            if toast in self.toasts:
+                self.toasts.remove(toast)
+                toast.destroy()
+
+        self.parent.after(duration, remove)
+
+
+# ============================================================================
+# Sidebar Navigation
+# ============================================================================
+
+class Sidebar(ctk.CTkFrame):
+    """แถบนำทางด้านซ้าย — เลือกหน้าที่ต้องการใช้งาน"""
+
+    def __init__(self, parent, app):
+        super().__init__(parent, width=SIDEBAR_WIDTH, corner_radius=0, fg_color=PRIMARY_DARK)
+        self.app = app
+        self.buttons = []
+        self.active_index = 0
+
+        # โลโก้/ชื่อระบบ
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=15, pady=(20, 5))
+        ctk.CTkLabel(header, text="📷", font=(FONT_FAMILY, 32)).pack()
+        ctk.CTkLabel(
+            header, text="ระบบเช็คชื่อ\nด้วยใบหน้า",
+            font=(FONT_FAMILY, 13, "bold"), text_color="white", justify="center",
+        ).pack(pady=(4, 0))
+
+        ctk.CTkFrame(self, height=1, fg_color="#3A5384").pack(fill="x", padx=20, pady=12)
+
+        # Navigation buttons
+        nav_items = [
+            ("🧑‍🎓", "จัดการนักเรียน"),
+            ("📅", "จัดการกิจกรรม"),
+            ("📷", "เช็คชื่อ"),
+            ("📊", "รายงาน"),
+        ]
+        for i, (icon, label) in enumerate(nav_items):
+            btn = ctk.CTkButton(
+                self, text=f"  {icon}  {label}",
+                font=(FONT_FAMILY, 13, "bold"),
+                fg_color="transparent", text_color="white",
+                hover_color="#27467D",
+                anchor="w", height=44, corner_radius=8,
+                command=lambda idx=i: self._select(idx),
+            )
+            btn.pack(fill="x", padx=10, pady=2)
+            self.buttons.append(btn)
+
+        self._highlight(0)
+
+        # Badge counts
+        self.badge_labels = {}
+
+        # Spacer
+        ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
+
+        # Bottom section — sound toggle + dark mode + version
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(fill="x", padx=15, pady=(0, 15))
+
+        # Sound toggle
+        sound_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        sound_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(sound_row, text="🔊 เสียง", text_color="white", font=FONT_SMALL).pack(side="left")
+        self.sound_switch = ctk.CTkSwitch(
+            sound_row, text="", width=40, height=20,
+            command=self._toggle_sound,
+        )
+        self.sound_switch.pack(side="right")
+        try:
+            from sound_manager import sound
+            if sound.is_enabled():
+                self.sound_switch.select()
+        except Exception:
+            self.sound_switch.select()
+
+        # Dark mode toggle
+        mode_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        mode_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(mode_row, text="🌙 โหมดมืด", text_color="white", font=FONT_SMALL).pack(side="left")
+        self.mode_switch = ctk.CTkSwitch(
+            mode_row, text="", width=40, height=20,
+            command=self._toggle_mode,
+        )
+        self.mode_switch.pack(side="right")
+
+        ctk.CTkFrame(self, height=1, fg_color="#3A5384").pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(
+            self, text=f"v{APP_VERSION}", text_color="#8EA0C0", font=(FONT_FAMILY, 9),
+        ).pack(pady=(0, 8))
+
+    def _select(self, index):
+        self.active_index = index
+        self._highlight(index)
+        self.app.show_page(index)
+
+    def _highlight(self, index):
+        for i, btn in enumerate(self.buttons):
+            if i == index:
+                btn.configure(fg_color=PRIMARY_COLOR)
+            else:
+                btn.configure(fg_color="transparent")
+
+    def _toggle_sound(self):
+        try:
+            from sound_manager import sound
+            enabled = bool(self.sound_switch.get())
+            sound.set_enabled(enabled)
+            # Sync with AttendanceTab switch if exists
+            if hasattr(self.app, 'attendance_tab') and hasattr(self.app.attendance_tab, 'sound_switch'):
+                if enabled:
+                    self.app.attendance_tab.sound_switch.select()
+                else:
+                    self.app.attendance_tab.sound_switch.deselect()
+        except Exception:
+            pass
+
+    def _toggle_mode(self):
+        if self.mode_switch.get():
+            ctk.set_appearance_mode("dark")
+        else:
+            ctk.set_appearance_mode("light")
+
+
+# ============================================================================
 # Tab 1: จัดการนักเรียน + ลงทะเบียนใบหน้า
 # ============================================================================
 
-class StudentTab(ttk.Frame):
+class StudentTab(ctk.CTkFrame):
     def __init__(self, parent, app):
-        super().__init__(parent)
+        super().__init__(parent, fg_color="transparent")
         self.app = app
         self.camera = None
         self.preview_job = None
@@ -73,120 +262,173 @@ class StudentTab(ttk.Frame):
 
     def _build_ui(self):
         # --- ซ้าย: ฟอร์ม + กล้อง ---
-        left = ttk.Frame(self)
-        left.pack(side="left", fill="y", padx=10, pady=10)
+        left = ctk.CTkFrame(self, fg_color="transparent", width=420)
+        left.pack(side="left", fill="y", padx=(15, 5), pady=15)
+        left.pack_propagate(False)
 
-        form = ttk.LabelFrame(left, text=" ข้อมูลนักเรียน ", padding=10)
+        # ฟอร์มข้อมูลนักเรียน
+        form = ctk.CTkFrame(left, corner_radius=12)
         form.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(form, text="รหัสนักเรียน:", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w", padx=5, pady=4)
-        self.entry_code = ttk.Entry(form, width=25)
-        self.entry_code.grid(row=0, column=1, padx=5, pady=4)
+        ctk.CTkLabel(form, text="ข้อมูลนักเรียน", font=FONT_HEADER, anchor="w").pack(
+            fill="x", padx=15, pady=(12, 6)
+        )
 
-        ttk.Label(form, text="ชื่อ-สกุล:", style="FieldLabel.TLabel").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-        self.entry_name = ttk.Entry(form, width=25)
-        self.entry_name.grid(row=1, column=1, padx=5, pady=4)
+        fields_frame = ctk.CTkFrame(form, fg_color="transparent")
+        fields_frame.pack(fill="x", padx=15, pady=(0, 10))
 
-        ttk.Label(form, text="ห้อง/ระดับชั้น:", style="FieldLabel.TLabel").grid(row=2, column=0, sticky="w", padx=5, pady=4)
-        self.entry_class = ttk.Entry(form, width=25)
-        self.entry_class.grid(row=2, column=1, padx=5, pady=4)
+        ctk.CTkLabel(fields_frame, text="รหัสนักเรียน", font=FONT_BOLD, anchor="w").pack(fill="x")
+        self.entry_code = ctk.CTkEntry(fields_frame, placeholder_text="เช่น 6530101001", height=35)
+        self.entry_code.pack(fill="x", pady=(2, 8))
 
-        ttk.Label(form, text="สาขา:", style="FieldLabel.TLabel").grid(row=3, column=0, sticky="w", padx=5, pady=4)
-        self.entry_department = ttk.Entry(form, width=25)
-        self.entry_department.grid(row=3, column=1, padx=5, pady=4)
+        ctk.CTkLabel(fields_frame, text="ชื่อ-สกุล", font=FONT_BOLD, anchor="w").pack(fill="x")
+        self.entry_name = ctk.CTkEntry(fields_frame, placeholder_text="เช่น นายสมชาย ใจดี", height=35)
+        self.entry_name.pack(fill="x", pady=(2, 8))
 
-        ttk.Button(
-            form, text="1) บันทึกข้อมูลนักเรียน", style="Accent.TButton", command=self._save_student
-        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=(8, 4))
+        ctk.CTkLabel(fields_frame, text="ห้อง/ระดับชั้น", font=FONT_BOLD, anchor="w").pack(fill="x")
+        self.entry_class = ctk.CTkEntry(fields_frame, placeholder_text="เช่น ปวช.1/1", height=35)
+        self.entry_class.pack(fill="x", pady=(2, 8))
 
-        cam_frame = ttk.LabelFrame(left, text=" 2) ลงทะเบียนใบหน้า (เปิดกล้อง) ", padding=10)
+        ctk.CTkLabel(fields_frame, text="สาขา", font=FONT_BOLD, anchor="w").pack(fill="x")
+        self.entry_department = ctk.CTkEntry(fields_frame, placeholder_text="เช่น คอมพิวเตอร์ธุรกิจ", height=35)
+        self.entry_department.pack(fill="x", pady=(2, 8))
+
+        ctk.CTkButton(
+            form, text="1) บันทึกข้อมูลนักเรียน",
+            font=FONT_BOLD, fg_color=PRIMARY_COLOR, hover_color=PRIMARY_DARK,
+            height=40, command=self._save_student,
+        ).pack(fill="x", padx=15, pady=(0, 12))
+
+        # กล้องลงทะเบียนใบหน้า
+        cam_frame = ctk.CTkFrame(left, corner_radius=12)
         cam_frame.pack(fill="x")
 
-        # แถวควบคุมกล้องทั้งหมดไว้ด้านบนสุด (เหนือภาพพรีวิว) กันไม่ให้ปุ่มโดนภาพกล้องบดบัง
-        # เมื่อเปิดกล้องแล้วภาพพรีวิวขยายใหญ่ขึ้น
-        cam_select_row = ttk.Frame(cam_frame)
-        cam_select_row.pack(fill="x", padx=5, pady=(5, 0))
-        ttk.Label(cam_select_row, text="กล้อง:", style="FieldLabel.TLabel").pack(side="left")
-        self.camera_combo = ttk.Combobox(cam_select_row, state="readonly", width=10)
+        ctk.CTkLabel(cam_frame, text="2) ลงทะเบียนใบหน้า", font=FONT_HEADER, anchor="w").pack(
+            fill="x", padx=15, pady=(12, 6)
+        )
+
+        cam_controls = ctk.CTkFrame(cam_frame, fg_color="transparent")
+        cam_controls.pack(fill="x", padx=15, pady=(0, 6))
+
+        ctk.CTkLabel(cam_controls, text="กล้อง:", font=FONT_BASE).pack(side="left")
+        self.camera_combo = ctk.CTkComboBox(cam_controls, state="readonly", width=100, values=["กล้อง 0"])
         self.camera_combo.pack(side="left", padx=5)
-        ttk.Button(cam_select_row, text="รีเฟรช", command=self._refresh_camera_list).pack(side="left", padx=(0, 15))
+        ctk.CTkButton(cam_controls, text="รีเฟรช", width=70, height=28,
+                       fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+                       command=self._refresh_camera_list).pack(side="left", padx=(0, 8))
         self._refresh_camera_list()
 
-        self.btn_start_cam = ttk.Button(cam_select_row, text="เปิดกล้อง", command=self._toggle_camera)
-        self.btn_start_cam.pack(side="left", padx=(0, 5))
-        self.btn_capture = ttk.Button(
-            cam_select_row, text="ถ่ายภาพ + เก็บใบหน้า", style="Accent.TButton",
-            command=self._capture_face, state="disabled"
+        btn_row = ctk.CTkFrame(cam_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=15, pady=(0, 6))
+        self.btn_start_cam = ctk.CTkButton(
+            btn_row, text="เปิดกล้อง", width=100, height=32,
+            fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+            command=self._toggle_camera,
         )
-        self.btn_capture.pack(side="left")
+        self.btn_start_cam.pack(side="left", padx=(0, 6))
+        self.btn_capture = ctk.CTkButton(
+            btn_row, text="📸 ถ่ายภาพ + เก็บใบหน้า",
+            fg_color=PRIMARY_COLOR, hover_color=PRIMARY_DARK,
+            height=32, command=self._capture_face, state="disabled",
+        )
+        self.btn_capture.pack(side="left", fill="x", expand=True)
 
-        self.video_label = ttk.Label(cam_frame, text="กล้องยังไม่เปิด", anchor="center")
-        self.video_label.pack(padx=5, pady=(10, 5))
+        self.video_label = ctk.CTkLabel(cam_frame, text="กล้องยังไม่เปิด", height=280,
+                                          fg_color=("gray90", "gray20"), corner_radius=8)
+        self.video_label.pack(fill="x", padx=15, pady=(0, 6))
 
-        self.lbl_capture_status = ttk.Label(
+        self.lbl_capture_status = ctk.CTkLabel(
             cam_frame,
             text=f"ถ่ายแล้ว 0 / {config.ENROLL_SHOTS_PER_STUDENT} ภาพ (แนะนำหันหน้าหลายมุม)",
+            font=FONT_SMALL, text_color=MUTED_COLOR,
         )
-        self.lbl_capture_status.pack(pady=(0, 5))
+        self.lbl_capture_status.pack(padx=15, pady=(0, 10))
 
         # --- ขวา: รายชื่อนักเรียน ---
-        right = ttk.Frame(self)
-        right.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        right = ctk.CTkFrame(self, fg_color="transparent")
+        right.pack(side="left", fill="both", expand=True, padx=(5, 15), pady=15)
 
-        import_row = ttk.Frame(right)
-        import_row.pack(fill="x", pady=(0, 6))
-        ttk.Button(import_row, text="นำเข้ารายชื่อจากไฟล์ (Excel/CSV)", command=self._import_from_file).pack(
-            side="left"
-        )
-        ttk.Button(import_row, text="ดาวน์โหลดเทมเพลต", command=self._download_template).pack(
-            side="left", padx=6
-        )
+        # แถวนำเข้า
+        import_row = ctk.CTkFrame(right, fg_color="transparent")
+        import_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkButton(
+            import_row, text="📥 นำเข้ารายชื่อจากไฟล์ (Excel/CSV)",
+            fg_color=PRIMARY_COLOR, hover_color=PRIMARY_DARK,
+            height=34, command=self._import_from_file,
+        ).pack(side="left")
+        ctk.CTkButton(
+            import_row, text="📋 ดาวน์โหลดเทมเพลต",
+            fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+            height=34, command=self._download_template,
+        ).pack(side="left", padx=6)
 
-        filter_row = ttk.Frame(right)
-        filter_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(filter_row, text="กลุ่มเรียน/ห้อง:").pack(side="left")
-        self.room_filter_combo = ttk.Combobox(filter_row, state="readonly", width=16)
-        self.room_filter_combo.pack(side="left", padx=5)
-        self.room_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_student_list())
+        # แถวกรอง
+        filter_frame = ctk.CTkFrame(right, corner_radius=8)
+        filter_frame.pack(fill="x", pady=(0, 8))
+        filter_inner = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        filter_inner.pack(fill="x", padx=10, pady=8)
 
-        ttk.Label(filter_row, text="สาขา:").pack(side="left", padx=(10, 0))
-        self.department_filter_combo = ttk.Combobox(filter_row, state="readonly", width=18)
-        self.department_filter_combo.pack(side="left", padx=5)
-        self.department_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_student_list())
+        ctk.CTkLabel(filter_inner, text="ห้อง:", font=FONT_SMALL).pack(side="left")
+        self.room_filter_combo = ctk.CTkComboBox(filter_inner, state="readonly", width=120,
+                                                  values=["ทั้งหมด"], command=lambda v: self._refresh_student_list())
+        self.room_filter_combo.pack(side="left", padx=(4, 10))
+        self.room_filter_combo.set("ทั้งหมด")
 
-        ttk.Label(filter_row, text="ค้นหา:").pack(side="left", padx=(10, 0))
-        self.entry_search = ttk.Entry(filter_row)
-        self.entry_search.pack(side="left", fill="x", expand=True, padx=5)
+        ctk.CTkLabel(filter_inner, text="สาขา:", font=FONT_SMALL).pack(side="left")
+        self.department_filter_combo = ctk.CTkComboBox(filter_inner, state="readonly", width=140,
+                                                        values=["ทั้งหมด"], command=lambda v: self._refresh_student_list())
+        self.department_filter_combo.pack(side="left", padx=(4, 10))
+        self.department_filter_combo.set("ทั้งหมด")
+
+        ctk.CTkLabel(filter_inner, text="🔍", font=FONT_SMALL).pack(side="left")
+        self.entry_search = ctk.CTkEntry(filter_inner, placeholder_text="ค้นหาชื่อ/รหัส...", height=30)
+        self.entry_search.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self.entry_search.bind("<KeyRelease>", lambda e: self._refresh_student_list())
 
-        # แผงแสดงข้อมูลกลุ่มเรียน (รหัสกลุ่มเรียน/ชื่อกลุ่มเรียน/ครูที่ปรึกษา) ของห้องที่เลือกกรองอยู่
-        self.lbl_group_info = ttk.Label(right, text="", foreground="#2E5395")
-        self.lbl_group_info.pack(anchor="w", pady=(0, 4))
+        # ข้อมูลกลุ่มเรียน
+        self.lbl_group_info = ctk.CTkLabel(right, text="", text_color=PRIMARY_COLOR, font=FONT_SMALL, anchor="w")
+        self.lbl_group_info.pack(fill="x", pady=(0, 2))
 
-        ttk.Label(
-            right, text="ดับเบิลคลิกที่แถวเพื่อเลือกนักเรียนคนนั้นสำหรับถ่ายภาพลงทะเบียนใบหน้า",
-            foreground="#555555",
-        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(
+            right, text="ดับเบิลคลิกที่แถวเพื่อเลือกนักเรียนสำหรับถ่ายภาพลงทะเบียนใบหน้า",
+            text_color=MUTED_COLOR, font=FONT_SMALL, anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+        # ตาราง Treeview (ยังใช้ ttk Treeview เพราะ CTk ไม่มี Treeview)
+        tree_frame = ctk.CTkFrame(right, corner_radius=8)
+        tree_frame.pack(fill="both", expand=True)
+
+        style = ttk.Style()
+        style.configure("Enterprise.Treeview", rowheight=28, font=FONT_BASE)
+        style.configure("Enterprise.Treeview.Heading", font=FONT_BOLD)
 
         columns = ("code", "name", "class", "department", "type", "status", "faces")
-        self.tree = ttk.Treeview(right, columns=columns, show="headings", height=18)
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings",
+                                  style="Enterprise.Treeview")
         for col, text, w in [
-            ("code", "รหัส", 95),
-            ("name", "ชื่อ-สกุล", 190),
-            ("class", "ห้อง", 80),
-            ("department", "สาขา", 130),
-            ("type", "ประเภทผู้เรียน", 90),
-            ("status", "สถานะ", 90),
-            ("faces", "จำนวนภาพใบหน้า", 110),
+            ("code", "รหัส", 95), ("name", "ชื่อ-สกุล", 180), ("class", "ห้อง", 80),
+            ("department", "สาขา", 130), ("type", "ประเภท", 80),
+            ("status", "สถานะ", 80), ("faces", "ภาพใบหน้า", 80),
         ]:
             self.tree.heading(col, text=text)
             self.tree.column(col, width=w)
-        self.tree.pack(fill="both", expand=True, pady=5)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side="right", fill="y", pady=8, padx=(0, 4))
         self.tree.bind("<Double-1>", self._select_student_for_enrollment)
 
-        ttk.Button(right, text="🗑  ลบนักเรียนที่เลือก", style="Danger.TButton", command=self._delete_selected).pack(
-            anchor="e", pady=4
-        )
+        # แถวล่าง
+        bottom_row = ctk.CTkFrame(right, fg_color="transparent")
+        bottom_row.pack(fill="x", pady=(6, 0))
+        self.lbl_student_count = ctk.CTkLabel(bottom_row, text="", font=FONT_SMALL, text_color=MUTED_COLOR)
+        self.lbl_student_count.pack(side="left")
+        ctk.CTkButton(
+            bottom_row, text="🗑  ลบนักเรียนที่เลือก",
+            fg_color=DANGER_COLOR, hover_color="#8B0000",
+            height=32, width=180, command=self._delete_selected,
+        ).pack(side="right")
 
         self._refresh_room_filter()
         self._refresh_department_filter()
@@ -210,16 +452,17 @@ class StudentTab(ttk.Frame):
         self.current_student_id = database.add_student(code, name, klass, department=dept)
         self.captured_count = 0
         self.pending_embeddings = []
-        self.lbl_capture_status.config(
+        self.lbl_capture_status.configure(
             text=f"ถ่ายแล้ว 0 / {config.ENROLL_SHOTS_PER_STUDENT} ภาพ (แนะนำหันหน้าหลายมุม)"
         )
         self._refresh_room_filter()
         self._refresh_department_filter()
+        self.app.toast.show(f"บันทึกข้อมูล {name} สำเร็จ", "success")
         messagebox.showinfo(
             "สำเร็จ", "บันทึกข้อมูลนักเรียนแล้ว\nขั้นต่อไป: เปิดกล้องแล้วกด 'ถ่ายภาพ + เก็บใบหน้า'"
         )
 
-    def _refresh_student_list(self):
+    def _refresh_student_list(self, *_args):
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -229,8 +472,11 @@ class StudentTab(ttk.Frame):
             self.entry_search.get().strip(), class_room=selected_room, department=selected_dept
         )
 
+        enrolled_count = 0
         for s in students:
             n_faces = database.count_embeddings_for_student(s["id"])
+            if n_faces > 0:
+                enrolled_count += 1
             self.tree.insert(
                 "", "end", iid=str(s["id"]),
                 values=(
@@ -239,33 +485,37 @@ class StudentTab(ttk.Frame):
                 ),
             )
 
+        total = len(students)
+        self.lbl_student_count.configure(
+            text=f"แสดง {total} คน  |  ลงทะเบียนใบหน้าแล้ว {enrolled_count} คน"
+        )
         self._update_group_info_panel(selected_room)
 
     def _refresh_room_filter(self):
         current = self.room_filter_combo.get()
         rooms = database.list_class_rooms()
         values = ["ทั้งหมด"] + rooms
-        self.room_filter_combo["values"] = values
+        self.room_filter_combo.configure(values=values)
         if current in values:
             self.room_filter_combo.set(current)
         else:
-            self.room_filter_combo.current(0)
+            self.room_filter_combo.set("ทั้งหมด")
         self._refresh_student_list()
 
     def _refresh_department_filter(self):
         current = self.department_filter_combo.get()
         depts = database.list_departments()
         values = ["ทั้งหมด"] + depts
-        self.department_filter_combo["values"] = values
+        self.department_filter_combo.configure(values=values)
         if current in values:
             self.department_filter_combo.set(current)
         else:
-            self.department_filter_combo.current(0)
+            self.department_filter_combo.set("ทั้งหมด")
         self._refresh_student_list()
 
     def _update_group_info_panel(self, selected_room):
         if not selected_room or selected_room == "ทั้งหมด":
-            self.lbl_group_info.config(text="")
+            self.lbl_group_info.configure(text="")
             return
         group = database.get_class_group_by_level(selected_room)
         if group:
@@ -276,9 +526,9 @@ class StudentTab(ttk.Frame):
                 parts.append(f"ชื่อกลุ่มเรียน: {group['group_name']}")
             if group.get("advisor_teacher"):
                 parts.append(f"ครูที่ปรึกษา: {group['advisor_teacher']}")
-            self.lbl_group_info.config(text="  |  ".join(parts) if parts else "ไม่มีข้อมูลกลุ่มเรียนเพิ่มเติม")
+            self.lbl_group_info.configure(text="  |  ".join(parts) if parts else "ไม่มีข้อมูลกลุ่มเรียนเพิ่มเติม")
         else:
-            self.lbl_group_info.config(text="ไม่มีข้อมูลกลุ่มเรียน (นักเรียนกลุ่มนี้ถูกเพิ่มด้วยมือ/เทมเพลตทั่วไป)")
+            self.lbl_group_info.configure(text="ไม่มีข้อมูลกลุ่มเรียน (นักเรียนกลุ่มนี้ถูกเพิ่มด้วยมือ/เทมเพลตทั่วไป)")
 
     def _delete_selected(self):
         sel = self.tree.selection()
@@ -290,6 +540,7 @@ class StudentTab(ttk.Frame):
             self._refresh_room_filter()
             self._refresh_department_filter()
             self.app.refresh_matcher()
+            self.app.toast.show(f"ลบนักเรียน {len(sel)} คนสำเร็จ", "success")
 
     # -------------------------------------------------------------- นำเข้าไฟล์
     def _import_from_file(self):
@@ -318,6 +569,7 @@ class StudentTab(ttk.Frame):
             more = "" if len(result["errors"]) <= 10 else f"\n...และอีก {len(result['errors']) - 10} รายการ"
             msg += f"\n\nพบข้อผิดพลาด {len(result['errors'])} รายการ:\n{shown}{more}"
         messagebox.showinfo("ผลการนำเข้า", msg)
+        self.app.toast.show(f"นำเข้า {result['success']} คนสำเร็จ", "success")
 
     def _download_template(self):
         path = filedialog.asksaveasfilename(
@@ -362,7 +614,7 @@ class StudentTab(ttk.Frame):
         self.entry_department.delete(0, "end")
         self.entry_department.insert(0, student.get("department") or "")
 
-        self.lbl_capture_status.config(
+        self.lbl_capture_status.configure(
             text=f"เลือก: {student['full_name']} — ถ่ายแล้ว {self.captured_count} / "
             f"{config.ENROLL_SHOTS_PER_STUDENT} ภาพ"
         )
@@ -371,16 +623,17 @@ class StudentTab(ttk.Frame):
     def _refresh_camera_list(self):
         cams = camera_utils.list_available_cameras()
         if not cams:
-            cams = [config.CAMERA_INDEX]  # เผื่อตรวจไม่เจอเลย ยังให้เลือก index เริ่มต้นได้
-        self.camera_combo["values"] = [f"กล้อง {i}" for i in cams]
+            cams = [config.CAMERA_INDEX]
+        values = [f"กล้อง {i}" for i in cams]
+        self.camera_combo.configure(values=values)
 
         saved = database.get_setting("camera_index", str(config.CAMERA_INDEX))
         try:
             saved_idx = int(saved)
         except (TypeError, ValueError):
             saved_idx = config.CAMERA_INDEX
-        default_pos = cams.index(saved_idx) if saved_idx in cams else 0
-        self.camera_combo.current(default_pos)
+        default_label = f"กล้อง {saved_idx}" if saved_idx in cams else values[0]
+        self.camera_combo.set(default_label)
 
     def _selected_camera_index(self):
         label = self.camera_combo.get()
@@ -399,8 +652,9 @@ class StudentTab(ttk.Frame):
                 messagebox.showerror("เปิดกล้องไม่สำเร็จ", str(e))
                 self.camera = None
                 return
-            self.btn_start_cam.config(text="ปิดกล้อง")
-            self.btn_capture.config(state="normal")
+            self.btn_start_cam.configure(text="ปิดกล้อง", fg_color=DANGER_COLOR, hover_color="#8B0000",
+                                          text_color="white")
+            self.btn_capture.configure(state="normal")
             self._update_preview()
         else:
             self._stop_camera()
@@ -412,9 +666,10 @@ class StudentTab(ttk.Frame):
         if self.camera:
             self.camera.stop()
             self.camera = None
-        self.btn_start_cam.config(text="เปิดกล้อง")
-        self.btn_capture.config(state="disabled")
-        self.video_label.config(image="", text="กล้องยังไม่เปิด")
+        self.btn_start_cam.configure(text="เปิดกล้อง", fg_color="transparent",
+                                      text_color=PRIMARY_COLOR)
+        self.btn_capture.configure(state="disabled")
+        self.video_label.configure(image=None, text="กล้องยังไม่เปิด")
 
     def _update_preview(self):
         if self.camera is None:
@@ -422,10 +677,10 @@ class StudentTab(ttk.Frame):
         frame = self.camera.read()
         if frame is not None:
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, (480, 360))
+            img = cv2.resize(img, (400, 300))
             imgtk = ImageTk.PhotoImage(image=Image.fromarray(img))
             self.video_label.imgtk = imgtk
-            self.video_label.config(image=imgtk, text="")
+            self.video_label.configure(image=imgtk, text="")
         self.preview_job = self.after(30, self._update_preview)
 
     def _capture_face(self):
@@ -448,14 +703,29 @@ class StudentTab(ttk.Frame):
             messagebox.showwarning("พบหลายใบหน้า", "กรุณาให้มีใบหน้าเดียวในเฟรมตอนลงทะเบียน")
             return
 
+        # Face Quality Check
         face = faces[0]
+        quality = face_engine.assess_face_quality(frame, face.bbox)
+        if not quality["pass"]:
+            reasons = "\n".join(f"• {r}" for r in quality["reasons"])
+            messagebox.showwarning("คุณภาพภาพไม่ผ่าน", f"กรุณาปรับปรุง:\n{reasons}")
+            return
+
         database.add_embedding(self.current_student_id, face.embedding)
         self.captured_count += 1
-        self.lbl_capture_status.config(
+        self.lbl_capture_status.configure(
             text=f"ถ่ายแล้ว {self.captured_count} / {config.ENROLL_SHOTS_PER_STUDENT} ภาพ (แนะนำหันหน้าหลายมุม)"
         )
         self._refresh_student_list()
         self.app.refresh_matcher()
+        self.app.toast.show(f"ถ่ายภาพที่ {self.captured_count} สำเร็จ ✓", "success")
+
+        # เล่นเสียง
+        try:
+            from sound_manager import sound
+            sound.play_capture()
+        except Exception:
+            pass
 
         if self.captured_count >= config.ENROLL_SHOTS_PER_STUDENT:
             messagebox.showinfo("ครบแล้ว", "ลงทะเบียนใบหน้าครบตามจำนวนที่แนะนำแล้ว\nสามารถถ่ายเพิ่มได้ถ้าต้องการความแม่นยำสูงขึ้น")
@@ -465,46 +735,91 @@ class StudentTab(ttk.Frame):
 # Tab 2: จัดการกิจกรรม
 # ============================================================================
 
-class EventTab(ttk.Frame):
+class EventTab(ctk.CTkFrame):
     def __init__(self, parent, app):
-        super().__init__(parent)
+        super().__init__(parent, fg_color="transparent")
         self.app = app
         self._build_ui()
         self._refresh()
 
     def _build_ui(self):
-        form = ttk.LabelFrame(self, text=" สร้างกิจกรรมใหม่ ", padding=10)
-        form.pack(fill="x", padx=10, pady=10)
+        # ฟอร์มสร้างกิจกรรม
+        form = ctk.CTkFrame(self, corner_radius=12)
+        form.pack(fill="x", padx=15, pady=15)
 
-        ttk.Label(form, text="ชื่อกิจกรรม:", style="FieldLabel.TLabel").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.entry_name = ttk.Entry(form, width=40)
-        self.entry_name.grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(form, text="วันที่ (YYYY-MM-DD):", style="FieldLabel.TLabel").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.entry_date = ttk.Entry(form, width=40)
-        self.entry_date.grid(row=1, column=1, padx=5, pady=5)
-
-        ttk.Label(form, text="สถานที่:", style="FieldLabel.TLabel").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.entry_location = ttk.Entry(form, width=40)
-        self.entry_location.grid(row=2, column=1, padx=5, pady=5)
-
-        ttk.Button(form, text="+ สร้างกิจกรรม", style="Accent.TButton", command=self._create_event).grid(
-            row=3, column=0, columnspan=2, pady=8, sticky="ew"
+        ctk.CTkLabel(form, text="สร้างกิจกรรมใหม่", font=FONT_HEADER, anchor="w").pack(
+            fill="x", padx=15, pady=(12, 8)
         )
 
-        list_frame = ttk.LabelFrame(self, text=" กิจกรรมทั้งหมด ", padding=10)
-        list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        fields = ctk.CTkFrame(form, fg_color="transparent")
+        fields.pack(fill="x", padx=15, pady=(0, 10))
+
+        # Row 1: ชื่อกิจกรรม
+        ctk.CTkLabel(fields, text="ชื่อกิจกรรม", font=FONT_BOLD, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 10), pady=4
+        )
+        self.entry_name = ctk.CTkEntry(fields, placeholder_text="เช่น อบรมความปลอดภัย ครั้งที่ 1", height=35, width=350)
+        self.entry_name.grid(row=0, column=1, sticky="ew", pady=4)
+
+        # Row 2: วันที่
+        ctk.CTkLabel(fields, text="วันที่", font=FONT_BOLD, anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(0, 10), pady=4
+        )
+        date_frame = ctk.CTkFrame(fields, fg_color="transparent")
+        date_frame.grid(row=1, column=1, sticky="ew", pady=4)
+        self.entry_date = ctk.CTkEntry(date_frame, placeholder_text="YYYY-MM-DD", height=35, width=200)
+        self.entry_date.pack(side="left")
+        ctk.CTkButton(
+            date_frame, text="📅 วันนี้", width=80, height=35,
+            fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+            command=self._fill_today,
+        ).pack(side="left", padx=6)
+
+        # Row 3: สถานที่
+        ctk.CTkLabel(fields, text="สถานที่", font=FONT_BOLD, anchor="w").grid(
+            row=2, column=0, sticky="w", padx=(0, 10), pady=4
+        )
+        self.entry_location = ctk.CTkEntry(fields, placeholder_text="เช่น ห้องประชุมอาคาร 1", height=35, width=350)
+        self.entry_location.grid(row=2, column=1, sticky="ew", pady=4)
+
+        fields.columnconfigure(1, weight=1)
+
+        ctk.CTkButton(
+            form, text="+ สร้างกิจกรรม",
+            font=FONT_BOLD, fg_color=PRIMARY_COLOR, hover_color=PRIMARY_DARK,
+            height=42, command=self._create_event,
+        ).pack(fill="x", padx=15, pady=(0, 12))
+
+        # รายการกิจกรรม
+        list_frame = ctk.CTkFrame(self, corner_radius=12)
+        list_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+
+        ctk.CTkLabel(list_frame, text="กิจกรรมทั้งหมด", font=FONT_HEADER, anchor="w").pack(
+            fill="x", padx=15, pady=(12, 6)
+        )
+
+        tree_wrapper = ctk.CTkFrame(list_frame, fg_color="transparent")
+        tree_wrapper.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
         columns = ("name", "date", "location")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
-        for col, text, w in [("name", "ชื่อกิจกรรม", 300), ("date", "วันที่", 120), ("location", "สถานที่", 200)]:
+        self.tree = ttk.Treeview(tree_wrapper, columns=columns, show="headings",
+                                  style="Enterprise.Treeview", height=15)
+        for col, text, w in [("name", "ชื่อกิจกรรม", 350), ("date", "วันที่", 130), ("location", "สถานที่", 250)]:
             self.tree.heading(col, text=text)
             self.tree.column(col, width=w)
-        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
+        self.tree.pack(fill="both", expand=True)
 
-        ttk.Button(list_frame, text="🗑  ลบกิจกรรมที่เลือก", style="Danger.TButton", command=self._delete_selected).pack(
-            anchor="e", padx=5, pady=4
-        )
+        btn_row = ctk.CTkFrame(list_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=15, pady=(0, 10))
+        ctk.CTkButton(
+            btn_row, text="🗑  ลบกิจกรรมที่เลือก",
+            fg_color=DANGER_COLOR, hover_color="#8B0000",
+            height=34, width=200, command=self._delete_selected,
+        ).pack(side="right")
+
+    def _fill_today(self):
+        self.entry_date.delete(0, "end")
+        self.entry_date.insert(0, datetime.date.today().isoformat())
 
     def _create_event(self):
         name = self.entry_name.get().strip()
@@ -520,6 +835,7 @@ class EventTab(ttk.Frame):
         self._refresh()
         self.app.attendance_tab.refresh_event_list()
         self.app.report_tab.refresh_event_list()
+        self.app.toast.show(f"สร้างกิจกรรม '{name}' สำเร็จ", "success")
 
     def _refresh(self):
         for row in self.tree.get_children():
@@ -543,90 +859,160 @@ class EventTab(ttk.Frame):
 
 
 # ============================================================================
-# Tab 3: เช็คชื่อด้วยกล้อง (real-time)
+# Tab 3: เช็คชื่อด้วยกล้อง (real-time) — Enterprise Edition
 # ============================================================================
 
-class AttendanceTab(ttk.Frame):
+class AttendanceTab(ctk.CTkFrame):
     def __init__(self, parent, app):
-        super().__init__(parent)
+        super().__init__(parent, fg_color="transparent")
         self.app = app
         self.camera = None
         self.worker = None
         self.display_job = None
+        self._scan_count = 0
         self._build_ui()
         self.refresh_event_list()
 
     def _build_ui(self):
-        top = ttk.Frame(self, style="Card.TFrame", padding=10)
-        top.pack(fill="x", padx=10, pady=10)
+        # --- แถวควบคุม (บนสุด) ---
+        top = ctk.CTkFrame(self, corner_radius=12)
+        top.pack(fill="x", padx=15, pady=(15, 8))
 
-        ttk.Label(top, text="กิจกรรม:", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self.event_combo = ttk.Combobox(top, state="readonly", width=32)
-        self.event_combo.grid(row=0, column=1, padx=(0, 15))
+        controls = ctk.CTkFrame(top, fg_color="transparent")
+        controls.pack(fill="x", padx=15, pady=10)
 
-        ttk.Label(top, text="โหมดสแกน:", style="FieldLabel.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 4))
-        self.scan_mode_combo = ttk.Combobox(
-            top, state="readonly", width=14, values=["สแกนเข้า", "สแกนออก"]
+        ctk.CTkLabel(controls, text="กิจกรรม:", font=FONT_BOLD).pack(side="left")
+        self.event_combo = ctk.CTkComboBox(controls, state="readonly", width=250, values=[])
+        self.event_combo.pack(side="left", padx=(4, 12))
+
+        ctk.CTkLabel(controls, text="โหมด:", font=FONT_BOLD).pack(side="left")
+        self.scan_mode_combo = ctk.CTkComboBox(
+            controls, state="readonly", width=120, values=["สแกนเข้า", "สแกนออก"]
         )
-        self.scan_mode_combo.current(0)
-        self.scan_mode_combo.grid(row=0, column=3, padx=(0, 15))
+        self.scan_mode_combo.set("สแกนเข้า")
+        self.scan_mode_combo.pack(side="left", padx=(4, 12))
 
-        ttk.Label(top, text="กล้อง:", style="FieldLabel.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 4))
-        self.camera_combo = ttk.Combobox(top, state="readonly", width=10)
-        self.camera_combo.grid(row=0, column=5, padx=(0, 5))
-        ttk.Button(top, text="รีเฟรช", command=self._refresh_camera_list).grid(row=0, column=6, padx=(0, 15))
+        ctk.CTkLabel(controls, text="กล้อง:", font=FONT_BOLD).pack(side="left")
+        self.camera_combo = ctk.CTkComboBox(controls, state="readonly", width=100, values=["กล้อง 0"])
+        self.camera_combo.pack(side="left", padx=(4, 4))
+        ctk.CTkButton(controls, text="🔄", width=32, height=32,
+                       fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+                       command=self._refresh_camera_list).pack(side="left", padx=(0, 12))
         self._refresh_camera_list()
 
-        self.btn_start = ttk.Button(
-            top, text="▶  เริ่มเช็คชื่อ", style="Accent.TButton", command=self._toggle_camera
+        self.btn_start = ctk.CTkButton(
+            controls, text="▶  เริ่มเช็คชื่อ",
+            font=FONT_BOLD, fg_color=SUCCESS_COLOR, hover_color="#1B5E20",
+            height=40, width=150, command=self._toggle_camera,
         )
-        self.btn_start.grid(row=0, column=7, padx=(0, 15))
+        self.btn_start.pack(side="left", padx=(0, 15))
 
-        self.lbl_status = ttk.Label(top, text="", style="StatusOk.TLabel")
-        self.lbl_status.grid(row=1, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        # สวิตช์เปิด/ปิดเสียงตรงหน้าเช็คชื่อ
+        sound_ctrl = ctk.CTkFrame(controls, fg_color="transparent")
+        sound_ctrl.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(sound_ctrl, text="🔊 เสียง:", font=FONT_BOLD).pack(side="left", padx=(0, 4))
+        self.sound_switch = ctk.CTkSwitch(
+            sound_ctrl, text="", width=40, height=20,
+            command=self._toggle_sound,
+        )
+        self.sound_switch.pack(side="left")
+        try:
+            from sound_manager import sound
+            if sound.is_enabled():
+                self.sound_switch.select()
+        except Exception:
+            self.sound_switch.select()
 
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # สถานะ
+        status_row = ctk.CTkFrame(top, fg_color="transparent")
+        status_row.pack(fill="x", padx=15, pady=(0, 8))
+        self.lbl_status = ctk.CTkLabel(status_row, text="", font=FONT_BOLD, text_color=SUCCESS_COLOR)
+        self.lbl_status.pack(side="left")
+        self.lbl_scan_count = ctk.CTkLabel(status_row, text="", font=FONT_BOLD, text_color=PRIMARY_COLOR)
+        self.lbl_scan_count.pack(side="right")
 
-        video_frame = ttk.LabelFrame(body, text=" กล้อง ", padding=8)
-        video_frame.pack(side="left", padx=(0, 10))
-        self.video_label = ttk.Label(video_frame, text="กล้องยังไม่เปิด", anchor="center")
-        self.video_label.pack()
+        # --- เนื้อหาหลัก ---
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
-        log_frame = ttk.LabelFrame(body, text=" รายชื่อที่สแกนล่าสุด ", padding=8)
-        log_frame.pack(side="left", fill="both", expand=True)
+        # วิดีโอ (ซ้าย)
+        video_container = ctk.CTkFrame(body, corner_radius=12, width=660)
+        video_container.pack(side="left", fill="y", padx=(0, 8))
+        video_container.pack_propagate(False)
+
+        ctk.CTkLabel(video_container, text="📷 กล้อง", font=FONT_BOLD, anchor="w").pack(
+            fill="x", padx=12, pady=(8, 4)
+        )
+        self.video_label = ctk.CTkLabel(video_container, text="กล้องยังไม่เปิด\n\nกรุณาเลือกกิจกรรมและกดเริ่มเช็คชื่อ",
+                                          height=480, fg_color=("gray90", "gray20"), corner_radius=8)
+        self.video_label.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        # ข้อความสแกนล่าสุด (overlay-style)
+        self.lbl_last_scan = ctk.CTkLabel(
+            video_container, text="", font=(FONT_FAMILY, 14, "bold"),
+            fg_color=SUCCESS_COLOR, text_color="white", corner_radius=6, height=0,
+        )
+
+        # Log (ขวา)
+        log_container = ctk.CTkFrame(body, corner_radius=12)
+        log_container.pack(side="left", fill="both", expand=True)
+
+        log_header = ctk.CTkFrame(log_container, fg_color="transparent")
+        log_header.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(log_header, text="📋 รายชื่อที่สแกนล่าสุด", font=FONT_BOLD).pack(side="left")
+
         columns = ("time", "code", "name", "type", "score")
-        self.log_tree = ttk.Treeview(log_frame, columns=columns, show="headings", height=20)
+        self.log_tree = ttk.Treeview(log_container, columns=columns, show="headings",
+                                      style="Enterprise.Treeview", height=20)
         for col, text, w in [
-            ("time", "เวลา", 85), ("code", "รหัส", 90),
-            ("name", "ชื่อ-สกุล", 200), ("type", "ประเภท", 70), ("score", "ความมั่นใจ", 80),
+            ("time", "เวลา", 80), ("code", "รหัส", 90),
+            ("name", "ชื่อ-สกุล", 180), ("type", "ประเภท", 65), ("score", "ความมั่นใจ", 75),
         ]:
             self.log_tree.heading(col, text=text)
             self.log_tree.column(col, width=w)
         self.log_tree.tag_configure("scan_in", foreground="#1565C0")
         self.log_tree.tag_configure("scan_out", foreground="#6A1B9A")
-        self.log_tree.pack(fill="both", expand=True)
+        self.log_tree.tag_configure("scan_success", background="#E8F5E9")
+        self.log_tree.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _toggle_sound(self):
+        try:
+            from sound_manager import sound
+            enabled = bool(self.sound_switch.get())
+            sound.set_enabled(enabled)
+            # Sync with Sidebar switch
+            if hasattr(self.app, 'sidebar') and hasattr(self.app.sidebar, 'sound_switch'):
+                if enabled:
+                    self.app.sidebar.sound_switch.select()
+                else:
+                    self.app.sidebar.sound_switch.deselect()
+            status_text = "เปิดเสียงสแกนแล้ว" if enabled else "ปิดเสียงสแกนแล้ว (โหมดเงียบ)"
+            self.app.toast.show(status_text, "info", duration=1500)
+        except Exception:
+            pass
 
     def refresh_event_list(self):
         events = database.list_events()
         self._events_by_label = {f"{e['event_name']} ({e['event_date']})": e["id"] for e in events}
-        self.event_combo["values"] = list(self._events_by_label.keys())
-        if self._events_by_label:
-            self.event_combo.current(0)
+        values = list(self._events_by_label.keys())
+        self.event_combo.configure(values=values)
+        if values:
+            self.event_combo.set(values[0])
 
     def _refresh_camera_list(self):
         cams = camera_utils.list_available_cameras()
         if not cams:
             cams = [config.CAMERA_INDEX]
-        self.camera_combo["values"] = [f"กล้อง {i}" for i in cams]
+        values = [f"กล้อง {i}" for i in cams]
+        self.camera_combo.configure(values=values)
 
         saved = database.get_setting("camera_index", str(config.CAMERA_INDEX))
         try:
             saved_idx = int(saved)
         except (TypeError, ValueError):
             saved_idx = config.CAMERA_INDEX
-        default_pos = cams.index(saved_idx) if saved_idx in cams else 0
-        self.camera_combo.current(default_pos)
+        default_label = f"กล้อง {saved_idx}" if saved_idx in cams else values[0]
+        self.camera_combo.set(default_label)
 
     def _selected_camera_index(self):
         label = self.camera_combo.get()
@@ -661,18 +1047,17 @@ class AttendanceTab(ttk.Frame):
                 self.camera = None
                 return
 
-            # แยกงานตรวจจับใบหน้า+เช็คชื่อไปรันบน thread ของตัวเอง
-            # เพื่อให้ภาพกล้องที่แสดงผลลื่น ไม่กระตุกตามความเร็วของ AI
             self.worker = detector_worker.AttendanceWorker(
                 camera=self.camera, engine=self.app.engine,
                 matcher=self.app.matcher, event_id=event_id, scan_type=scan_type,
             ).start()
 
-            self.btn_start.config(text="■  หยุดเช็คชื่อ")
-            self.event_combo.config(state="disabled")
-            self.scan_mode_combo.config(state="disabled")
+            self.btn_start.configure(text="■  หยุดเช็คชื่อ", fg_color=DANGER_COLOR, hover_color="#8B0000")
+            self.event_combo.configure(state="disabled")
+            self.scan_mode_combo.configure(state="disabled")
             scan_label = "สแกนเข้า" if scan_type == "in" else "สแกนออก"
-            self.lbl_status.config(text=f"กำลังทำงานในโหมด: {scan_label}", style="StatusOk.TLabel")
+            self.lbl_status.configure(text=f"● กำลังทำงาน — โหมด: {scan_label}", text_color=SUCCESS_COLOR)
+            self._scan_count = 0
             for row in self.log_tree.get_children():
                 self.log_tree.delete(row)
             self._refresh_display()
@@ -689,11 +1074,12 @@ class AttendanceTab(ttk.Frame):
         if self.camera:
             self.camera.stop()
             self.camera = None
-        self.btn_start.config(text="▶  เริ่มเช็คชื่อ")
-        self.event_combo.config(state="readonly")
-        self.scan_mode_combo.config(state="readonly")
-        self.video_label.config(image="", text="กล้องยังไม่เปิด")
-        self.lbl_status.config(text="")
+        self.btn_start.configure(text="▶  เริ่มเช็คชื่อ", fg_color=SUCCESS_COLOR, hover_color="#1B5E20")
+        self.event_combo.configure(state="readonly")
+        self.scan_mode_combo.configure(state="readonly")
+        self.video_label.configure(image=None, text="กล้องยังไม่เปิด\n\nกรุณาเลือกกิจกรรมและกดเริ่มเช็คชื่อ")
+        self.lbl_status.configure(text="")
+        self.lbl_last_scan.place_forget()
 
     def _current_event_id(self):
         label = self.event_combo.get()
@@ -704,7 +1090,6 @@ class AttendanceTab(ttk.Frame):
         ลูปนี้รันบน GUI thread ทุก ~30ms
         ดึง 'ภาพกล้องสดล่าสุด' มาแสดงเสมอ (ลื่นเท่าความเร็วกล้องจริง ไม่รอ AI)
         แล้วซ้อนกรอบ/ชื่อจากผลลัพธ์ AI ล่าสุดที่ worker คำนวณไว้ทับลงไป
-        ถ้า AI ช้ากว่ากล้อง กรอบจะขยับตามหลังเล็กน้อย แต่ภาพวิดีโอจะไม่กระตุก
         """
         if self.worker is None:
             return
@@ -712,26 +1097,51 @@ class AttendanceTab(ttk.Frame):
         frame = self.camera.read() if self.camera else None
         if frame is not None:
             for f in self.worker.get_latest_faces():
-                face_engine.draw_face_box(frame, f["bbox"], f["label"], color=f["color"])
+                status = f.get("scan_result", "ok")
+                face_engine.draw_face_box(frame, f["bbox"], f["label"], color=f["color"], status=status)
 
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, (600, 450))
+            img = cv2.resize(img, (636, 464))
             imgtk = ImageTk.PhotoImage(image=Image.fromarray(img))
             self.video_label.imgtk = imgtk
-            self.video_label.config(image=imgtk, text="")
+            self.video_label.configure(image=imgtk, text="")
 
+        # ดึงผลลัพธ์จาก worker queue
         new_names = []
         while True:
             try:
-                student, score, scan_type = self.worker.checkin_queue.get_nowait()
+                result = self.worker.checkin_queue.get_nowait()
+                # รองรับทั้ง tuple 3 และ 4 elements (backward compatibility)
+                if len(result) == 4:
+                    student, score, scan_type, result_type = result
+                else:
+                    student, score, scan_type = result
+                    result_type = "success"
+
+                # ข้าม camera error notifications
+                if student is None:
+                    if result_type == "camera_error":
+                        self.lbl_status.configure(text="⚠ ปัญหากล้อง — กำลัง retry...", text_color=WARNING_COLOR)
+                    continue
+
+                self._add_log_row(student, score, scan_type)
+                scan_label = "เข้า" if scan_type == "in" else "ออก"
+                new_names.append(f"{student['full_name']} ({scan_label})")
+                self._scan_count += 1
             except Exception:
                 break
-            self._add_log_row(student, score, scan_type)
-            scan_label = "เข้า" if scan_type == "in" else "ออก"
-            new_names.append(f"{student['full_name']} ({scan_label})")
 
         if new_names:
-            self.lbl_status.config(text="สแกนล่าสุด: " + ", ".join(new_names), style="StatusOk.TLabel")
+            last_name = new_names[-1]
+            self.lbl_status.configure(text=f"✓ สแกนล่าสุด: {last_name}", text_color=SUCCESS_COLOR)
+            self.lbl_scan_count.configure(text=f"สแกนแล้ว {self._scan_count} คน")
+
+            # Show overlay toast on video
+            self.lbl_last_scan.configure(text=f"  ✓ {last_name}  ")
+            self.lbl_last_scan.place(relx=0.5, y=50, anchor="center")
+            self.after(2000, lambda: self.lbl_last_scan.place_forget())
+
+            self.app.toast.show(f"✓ {last_name}", "success", duration=2000)
 
         self.display_job = self.after(30, self._refresh_display)
 
@@ -747,83 +1157,104 @@ class AttendanceTab(ttk.Frame):
                 scan_label,
                 f"{score*100:.0f}%",
             ),
-            tags=(tag,),
+            tags=(tag, "scan_success"),
         )
 
-class ReportTab(ttk.Frame):
+
+# ============================================================================
+# Tab 4: รายงาน
+# ============================================================================
+
+class ReportTab(ctk.CTkFrame):
     PCT_HIGH = 80
     PCT_MID = 50
     BAR_LEN = 16
     DEPT_ALL = "ทั้งหมด"
 
     def __init__(self, parent, app):
-        super().__init__(parent)
+        super().__init__(parent, fg_color="transparent")
         self.app = app
         self.chart_canvas_widget = None
         self._dept_sort_col = "pct"
         self._dept_sort_reverse = True
-        self._dept_rows = {}          
-        self._current_report = []    
-        self._current_absent = []    
+        self._dept_rows = {}
+        self._current_report = []
+        self._current_absent = []
         self._build_ui()
         self.refresh_event_list()
 
-
     def _build_ui(self):
-        top = ttk.Frame(self, style="Card.TFrame", padding=10)
-        top.pack(fill="x", padx=10, pady=10)
+        # แถวเลือกกิจกรรม
+        top = ctk.CTkFrame(self, corner_radius=12)
+        top.pack(fill="x", padx=15, pady=(15, 8))
 
-        ttk.Label(top, text="กิจกรรม:", style="FieldLabel.TLabel").pack(side="left")
-        self.event_combo = ttk.Combobox(top, state="readonly", width=38)
-        self.event_combo.pack(side="left", padx=(4, 15))
-        self.event_combo.bind("<<ComboboxSelected>>", lambda e: self._load_report())
+        controls = ctk.CTkFrame(top, fg_color="transparent")
+        controls.pack(fill="x", padx=15, pady=10)
 
-        ttk.Button(top, text="🔄  โหลดรายงาน", command=self._load_report).pack(side="left", padx=4)
-        ttk.Button(top, text="⬇  ส่งออก Excel (พร้อมกราฟ)", style="Accent.TButton", command=self._export).pack(
-            side="left", padx=4
-        )
+        ctk.CTkLabel(controls, text="กิจกรรม:", font=FONT_BOLD).pack(side="left")
+        self.event_combo = ctk.CTkComboBox(controls, state="readonly", width=300, values=[],
+                                            command=lambda v: self._load_report())
+        self.event_combo.pack(side="left", padx=(4, 12))
 
-        cards_row = ttk.Frame(self, padding=(10, 0))
-        cards_row.pack(fill="x")
-        self.card_total = self._make_stat_card(cards_row, "นักเรียนทั้งหมด", "#1F3A6E")
-        self.card_attended = self._make_stat_card(cards_row, "เข้าร่วมกิจกรรม", "#2E7D32")
-        self.card_not_attended = self._make_stat_card(cards_row, "ไม่เข้าร่วมกิจกรรม", "#C62828")
+        ctk.CTkButton(
+            controls, text="🔄 โหลดรายงาน",
+            fg_color="transparent", border_width=1, text_color=PRIMARY_COLOR,
+            height=34, command=self._load_report,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            controls, text="⬇ ส่งออก Excel (พร้อมกราฟ)",
+            font=FONT_BOLD, fg_color=PRIMARY_COLOR, hover_color=PRIMARY_DARK,
+            height=34, command=self._export,
+        ).pack(side="left", padx=4)
 
-        self.lbl_summary_note = ttk.Label(
+        # Stat Cards
+        cards_row = ctk.CTkFrame(self, fg_color="transparent")
+        cards_row.pack(fill="x", padx=15, pady=(0, 4))
+        self.card_total = self._make_stat_card(cards_row, "นักเรียนทั้งหมด", "👥", PRIMARY_COLOR)
+        self.card_attended = self._make_stat_card(cards_row, "เข้าร่วมกิจกรรม", "✅", SUCCESS_COLOR)
+        self.card_not_attended = self._make_stat_card(cards_row, "ไม่เข้าร่วมกิจกรรม", "❌", DANGER_COLOR)
+
+        self.lbl_summary_note = ctk.CTkLabel(
             self,
             text='เงื่อนไข: นับเป็น "เข้าร่วมกิจกรรม" เฉพาะผู้ที่มีทั้งสแกนเข้าและสแกนออกเท่านั้น',
-            style="Muted.TLabel",
-            padding=(10, 6, 10, 0),
+            font=FONT_SMALL, text_color=MUTED_COLOR,
         )
-        self.lbl_summary_note.pack(anchor="w")
+        self.lbl_summary_note.pack(anchor="w", padx=20, pady=(4, 0))
 
-        # --- แถบกรองตามสาขา ใช้ร่วมกันกับแท็บ "เข้าร่วม" / "ไม่เข้าร่วม" ---
-        filter_row = ttk.Frame(self, padding=(10, 8, 10, 0))
-        filter_row.pack(fill="x")
-        ttk.Label(filter_row, text="กรองรายชื่อตามสาขา:", style="FieldLabel.TLabel").pack(side="left")
-        self.dept_filter_combo = ttk.Combobox(filter_row, state="readonly", width=28)
-        self.dept_filter_combo.pack(side="left", padx=(4, 4))
-        self.dept_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_department_filter())
-        ttk.Button(filter_row, text="✕ ล้างตัวกรอง", command=self._clear_department_filter).pack(
-            side="left", padx=4
-        )
-        self.lbl_filter_status = ttk.Label(filter_row, text="", style="Muted.TLabel")
+        # แถบกรองสาขา
+        filter_row = ctk.CTkFrame(self, fg_color="transparent")
+        filter_row.pack(fill="x", padx=15, pady=(6, 0))
+        ctk.CTkLabel(filter_row, text="กรองตามสาขา:", font=FONT_BOLD).pack(side="left")
+        self.dept_filter_combo = ctk.CTkComboBox(filter_row, state="readonly", width=220, values=["ทั้งหมด"],
+                                                   command=lambda v: self._apply_department_filter())
+        self.dept_filter_combo.pack(side="left", padx=(4, 8))
+        self.dept_filter_combo.set("ทั้งหมด")
+        ctk.CTkButton(
+            filter_row, text="✕ ล้างตัวกรอง", width=100, height=28,
+            fg_color="transparent", border_width=1, text_color=MUTED_COLOR,
+            command=self._clear_department_filter,
+        ).pack(side="left")
+        self.lbl_filter_status = ctk.CTkLabel(filter_row, text="", font=FONT_SMALL, text_color=MUTED_COLOR)
         self.lbl_filter_status.pack(side="left", padx=10)
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
-        self.notebook = notebook
+        # Notebook sub-tabs
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=15, pady=(6, 15))
 
-        self.chart_frame = ttk.Frame(notebook)
-        notebook.add(self.chart_frame, text="  📊  สรุปภาพรวม  ")
+        # Tab: กราฟ
+        self.chart_frame = ctk.CTkFrame(self.notebook, fg_color="transparent")
+        self.notebook.add(self.chart_frame, text="  📊  สรุปภาพรวม  ")
 
-        self._build_department_tab(notebook)
+        # Tab: แยกตามสาขา
+        self._build_department_tab(self.notebook)
 
-        present_frame = ttk.Frame(notebook)
-        notebook.add(present_frame, text="  ✅  เข้าร่วมกิจกรรม  ")
-        self._present_tab_index = notebook.index("end") - 1
+        # Tab: เข้าร่วม
+        present_frame = ctk.CTkFrame(self.notebook, fg_color="transparent")
+        self.notebook.add(present_frame, text="  ✅  เข้าร่วมกิจกรรม  ")
+        self._present_tab_index = self.notebook.index("end") - 1
         columns = ("time_in", "time_out", "code", "name", "class", "dept", "score")
-        self.present_tree = ttk.Treeview(present_frame, columns=columns, show="headings", height=16)
+        self.present_tree = ttk.Treeview(present_frame, columns=columns, show="headings",
+                                          style="Enterprise.Treeview", height=16)
         for col, text, w in [
             ("time_in", "เวลาสแกนเข้า", 120), ("time_out", "เวลาสแกนออก", 120), ("code", "รหัส", 90),
             ("name", "ชื่อ-สกุล", 200), ("class", "ห้อง", 90), ("dept", "สาขา", 140), ("score", "ความมั่นใจ", 80),
@@ -833,11 +1264,12 @@ class ReportTab(ttk.Frame):
         self.present_tree.tag_configure("attended", foreground="#2E7D32")
         self.present_tree.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # --- แท็บไม่เข้าร่วมกิจกรรม (สแกนไม่ครบ + ไม่สแกนเลย) ---
-        absent_frame = ttk.Frame(notebook)
-        notebook.add(absent_frame, text="  ❌  ไม่เข้าร่วมกิจกรรม  ")
+        # Tab: ไม่เข้าร่วม
+        absent_frame = ctk.CTkFrame(self.notebook, fg_color="transparent")
+        self.notebook.add(absent_frame, text="  ❌  ไม่เข้าร่วมกิจกรรม  ")
         columns2 = ("code", "name", "class", "dept", "note")
-        self.absent_tree = ttk.Treeview(absent_frame, columns=columns2, show="headings", height=16)
+        self.absent_tree = ttk.Treeview(absent_frame, columns=columns2, show="headings",
+                                         style="Enterprise.Treeview", height=16)
         for col, text, w in [
             ("code", "รหัส", 90), ("name", "ชื่อ-สกุล", 200),
             ("class", "ห้อง", 90), ("dept", "สาขา", 140), ("note", "หมายเหตุ", 180),
@@ -847,31 +1279,40 @@ class ReportTab(ttk.Frame):
         self.absent_tree.tag_configure("not_attended", foreground="#C62828")
         self.absent_tree.pack(fill="both", expand=True, padx=5, pady=5)
 
-    def _make_stat_card(self, parent, title, color):
-        """การ์ดตัวเลขสรุปแบบย่อ (ใช้ 3 ใบ: ทั้งหมด / เข้าร่วม / ไม่เข้าร่วม)"""
-        card = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        card.pack(side="left", padx=(0, 10), fill="both", expand=True)
-        lbl_value = tk.Label(card, text="0", font=("Tahoma", 22, "bold"), fg=color, bg="#F4F6FA")
-        lbl_value.pack(anchor="w")
-        tk.Label(card, text=title, font=("Tahoma", 10), fg="#666666", bg="#F4F6FA").pack(anchor="w")
-        lbl_pct = tk.Label(card, text="", font=("Tahoma", 10, "bold"), fg=color, bg="#F4F6FA")
-        lbl_pct.pack(anchor="w")
+    def _make_stat_card(self, parent, title, icon, color):
+        """การ์ดตัวเลขสรุปแบบ Modern"""
+        card = ctk.CTkFrame(parent, corner_radius=12)
+        card.pack(side="left", padx=(0, 10), fill="both", expand=True, pady=4)
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=16, pady=12)
+
+        header_row = ctk.CTkFrame(inner, fg_color="transparent")
+        header_row.pack(fill="x")
+        ctk.CTkLabel(header_row, text=icon, font=(FONT_FAMILY, 20)).pack(side="left")
+        ctk.CTkLabel(header_row, text=title, font=FONT_SMALL, text_color=MUTED_COLOR).pack(side="left", padx=(6, 0))
+
+        lbl_value = ctk.CTkLabel(inner, text="0", font=FONT_BIG_NUM, text_color=color, anchor="w")
+        lbl_value.pack(fill="x", pady=(4, 0))
+        lbl_pct = ctk.CTkLabel(inner, text="", font=FONT_BOLD, text_color=color, anchor="w")
+        lbl_pct.pack(fill="x")
+
         return {"value": lbl_value, "pct": lbl_pct}
 
     def _build_department_tab(self, notebook):
-        """แท็บใหม่: ตารางสรุป % เข้าร่วมแยกตามสาขา เรียงลำดับได้ + คลิกเพื่อกรองรายชื่อ"""
-        dept_frame = ttk.Frame(notebook)
+        dept_frame = ctk.CTkFrame(notebook, fg_color="transparent")
         notebook.add(dept_frame, text="  🏫  แยกตามสาขา (%)  ")
         self._dept_tab_index = notebook.index("end") - 1
 
-        ttk.Label(
+        ctk.CTkLabel(
             dept_frame,
             text="คลิกหัวคอลัมน์เพื่อจัดเรียง • ดับเบิลคลิกแถวเพื่อกรองรายชื่อเฉพาะสาขานั้น",
-            style="Muted.TLabel",
+            font=FONT_SMALL, text_color=MUTED_COLOR,
         ).pack(anchor="w", padx=8, pady=(8, 4))
 
         columns = ("dept", "attended", "not_attended", "total", "pct_bar")
-        self.dept_tree = ttk.Treeview(dept_frame, columns=columns, show="headings", height=16)
+        self.dept_tree = ttk.Treeview(dept_frame, columns=columns, show="headings",
+                                       style="Enterprise.Treeview", height=16)
         headers = [
             ("dept", "สาขา", 200, "w"),
             ("attended", "เข้าร่วม", 90, "center"),
@@ -888,13 +1329,13 @@ class ReportTab(ttk.Frame):
         self.dept_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.dept_tree.bind("<Double-1>", self._on_department_row_double_click)
 
-
     def refresh_event_list(self):
         events = database.list_events()
         self._events_by_label = {f"{e['event_name']} ({e['event_date']})": e["id"] for e in events}
-        self.event_combo["values"] = list(self._events_by_label.keys())
-        if self._events_by_label:
-            self.event_combo.current(0)
+        values = list(self._events_by_label.keys())
+        self.event_combo.configure(values=values)
+        if values:
+            self.event_combo.set(values[0])
             self._load_report()
 
     def _current_event(self):
@@ -923,16 +1364,16 @@ class ReportTab(ttk.Frame):
         pct_attended = (summary["attended"] / total * 100) if total else 0
         pct_not_attended = 100 - pct_attended if total else 0
 
-        self.card_total["value"].config(text=str(total))
-        self.card_total["pct"].config(text="คน")
+        self.card_total["value"].configure(text=str(total))
+        self.card_total["pct"].configure(text="คน")
 
-        self.card_attended["value"].config(text=str(summary["attended"]))
-        self.card_attended["pct"].config(text=f"{pct_attended:.1f}%")
+        self.card_attended["value"].configure(text=str(summary["attended"]))
+        self.card_attended["pct"].configure(text=f"{pct_attended:.1f}%")
 
-        self.card_not_attended["value"].config(text=str(summary["not_attended"]))
-        self.card_not_attended["pct"].config(text=f"{pct_not_attended:.1f}%")
+        self.card_not_attended["value"].configure(text=str(summary["not_attended"]))
+        self.card_not_attended["pct"].configure(text=f"{pct_not_attended:.1f}%")
 
-    # ------------------------------------------------------- แท็บแยกตามสาขา (%) ---
+    # ------------------------------------------------------- แท็บแยกตามสาขา
 
     def _bar_text(self, pct):
         filled = round(pct / 100 * self.BAR_LEN)
@@ -962,7 +1403,6 @@ class ReportTab(ttk.Frame):
         self._render_department_tree_sorted()
 
     def _render_department_tree_sorted(self):
-        """เรียงและวาดตารางสาขาใหม่ตาม self._dept_sort_col / self._dept_sort_reverse"""
         self.dept_tree.delete(*self.dept_tree.get_children())
         col = self._dept_sort_col
         if col == "dept":
@@ -984,23 +1424,28 @@ class ReportTab(ttk.Frame):
             self._dept_sort_reverse = not self._dept_sort_reverse
         else:
             self._dept_sort_col = col
-            self._dept_sort_reverse = True  # ค่าเริ่มต้น: มาก -> น้อย
+            self._dept_sort_reverse = True
         self._render_department_tree_sorted()
 
     def _on_department_row_double_click(self, event):
         item = self.dept_tree.identify_row(event.y)
         if not item:
             return
-        if item in self.dept_filter_combo["values"]:
+        values = list(self.dept_filter_combo.cget("values") if hasattr(self.dept_filter_combo, 'cget') else [])
+        if not values:
+            try:
+                values = self.dept_filter_combo._values
+            except Exception:
+                values = []
+        if item in values:
             self.dept_filter_combo.set(item)
             self._apply_department_filter()
             self.notebook.select(self._present_tab_index)
 
-
     def _refresh_department_filter_options(self, by_department):
         values = [self.DEPT_ALL] + sorted(by_department.keys())
         current = self.dept_filter_combo.get()
-        self.dept_filter_combo["values"] = values
+        self.dept_filter_combo.configure(values=values)
         self.dept_filter_combo.set(current if current in values else self.DEPT_ALL)
 
     def _clear_department_filter(self):
@@ -1052,13 +1497,12 @@ class ReportTab(ttk.Frame):
             )
 
         if dept is None:
-            self.lbl_filter_status.config(text="")
+            self.lbl_filter_status.configure(text="")
         else:
-            self.lbl_filter_status.config(
+            self.lbl_filter_status.configure(
                 text=f"กำลังแสดงเฉพาะสาขา \"{dept}\"   —   เข้าร่วม {len(attended)} / "
                 f"{len(attended) + len(not_attended_partial) + len(absent)} คน"
             )
-
 
     def _render_chart(self, summary, event_name):
         if self.chart_canvas_widget is not None:
@@ -1074,8 +1518,9 @@ class ReportTab(ttk.Frame):
             self.chart_canvas_widget = canvas.get_tk_widget()
             self.chart_canvas_widget.pack(fill="both", expand=True, padx=10, pady=10)
         except Exception as e:
-            ttk.Label(
-                self.chart_frame, text=f"ไม่สามารถแสดงกราฟได้: {e}", style="Muted.TLabel"
+            ctk.CTkLabel(
+                self.chart_frame, text=f"ไม่สามารถแสดงกราฟได้: {e}",
+                text_color=MUTED_COLOR,
             ).pack(padx=20, pady=20)
 
     def _export(self):
@@ -1086,93 +1531,139 @@ class ReportTab(ttk.Frame):
         event_name = label.split(" (")[0]
         path = export_utils.export_attendance_report(event_id, event_name)
         messagebox.showinfo("ส่งออกสำเร็จ", f"บันทึกไฟล์แล้วที่:\n{path}")
+        self.app.toast.show("ส่งออก Excel สำเร็จ ✓", "success")
 
 
-class App(tk.Tk):
+# ============================================================================
+# Main Application — Enterprise Edition
+# ============================================================================
+
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("ระบบเช็คชื่อเข้าร่วมกิจกรรมด้วยใบหน้า - วิทยาลัยการอาชีพจอมทอง")
-        self.geometry("1280x800")
-        self.minsize(1100, 680)
+        self.title("ระบบเช็คชื่อเข้าร่วมกิจกรรมด้วยใบหน้า — วิทยาลัยการอาชีพจอมทอง")
+        self.geometry("1360x850")
+        self.minsize(1200, 720)
+
+        # ตั้งค่า CustomTkinter
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("blue")
 
         database.init_db()
 
         self.engine = None
         self.matcher = None
 
-        self._setup_style()
+        # Setup Treeview styles (ttk ยังใช้อยู่สำหรับ Treeview)
+        self._setup_treeview_style()
+
+        # Layout: Sidebar (ซ้าย) + Content (ขวา)
+        self.sidebar = Sidebar(self, self)
+        self.sidebar.pack(side="left", fill="y")
+
+        # Content area
+        self.content_area = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self.content_area.pack(side="left", fill="both", expand=True)
+
+        # Toast notification manager
+        self.toast = ToastManager(self.content_area)
+
+        # สร้าง pages (frames)
+        self.student_tab = StudentTab(self.content_area, self)
+        self.event_tab = EventTab(self.content_area, self)
+        self.attendance_tab = AttendanceTab(self.content_area, self)
+        self.report_tab = ReportTab(self.content_area, self)
+
+        self.pages = [self.student_tab, self.event_tab, self.attendance_tab, self.report_tab]
+        self.show_page(0)
+
+        # Status bar
+        self.status_bar = ctk.CTkFrame(self.content_area, height=32, corner_radius=0, fg_color=("gray92", "gray18"))
+        self.status_bar.pack(side="bottom", fill="x")
+        self.status_bar.pack_propagate(False)
+
+        self.lbl_model_status = ctk.CTkLabel(
+            self.status_bar, text="  ⏳ กำลังโหลดโมเดลจดจำใบหน้า กรุณารอสักครู่...",
+            font=FONT_SMALL, text_color=WARNING_COLOR,
+        )
+        self.lbl_model_status.pack(side="left", padx=8)
+
+        self.lbl_clock = ctk.CTkLabel(self.status_bar, text="", font=FONT_SMALL, text_color=MUTED_COLOR)
+        self.lbl_clock.pack(side="right", padx=8)
+        self._update_clock()
+
+        # Menu bar
         self._build_menu()
 
-        self.status_bar = ttk.Label(
-            self, text="  กำลังโหลดโมเดลจดจำใบหน้า กรุณารอสักครู่...",
-            style="StatusWarn.TLabel", padding=(4, 4),
-        )
-        self.status_bar.pack(side="bottom", fill="x")
-
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=8, pady=8)
-
-        self.student_tab = StudentTab(notebook, self)
-        self.event_tab = EventTab(notebook, self)
-        self.attendance_tab = AttendanceTab(notebook, self)
-        self.report_tab = ReportTab(notebook, self)
-
-        notebook.add(self.student_tab, text="  🧑‍🎓  1. จัดการนักเรียน  ")
-        notebook.add(self.event_tab, text="  📅  2. จัดการกิจกรรม  ")
-        notebook.add(self.attendance_tab, text="  📷  3. เช็คชื่อ  ")
-        notebook.add(self.report_tab, text="  📊  4. รายงาน  ")
+        # Keyboard shortcuts
+        self.bind("<F5>", lambda e: self._refresh_current())
+        self.bind("<Control-b>", lambda e: self._backup_database())
+        self.bind("<Control-e>", lambda e: self.report_tab._export())
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # โหลดโมเดลใน background
         ModelLoader(self._on_model_ready, self._on_model_error).start()
 
-    def _setup_style(self):
-        """ตั้งค่าธีม/สไตล์ ttk ทั้งระบบไว้ที่เดียว ให้หน้าตาสม่ำเสมอและอ่านง่ายทุกแท็บ"""
-        style = ttk.Style(self)
+    def _setup_treeview_style(self):
+        style = ttk.Style()
         try:
-            style.theme_use("vista") 
+            style.theme_use("vista")
         except tk.TclError:
-            pass
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
 
-        base_font = ("Tahoma", 10)
-        header_font = ("Tahoma", 12, "bold")
-        self.option_add("*Font", base_font)
+        base_font = (FONT_FAMILY, 10)
+        style.configure("Enterprise.Treeview", rowheight=28, font=base_font)
+        style.configure("Enterprise.Treeview.Heading", font=(FONT_FAMILY, 10, "bold"))
 
-        style.configure(".", font=base_font)
-        style.configure("TNotebook.Tab", font=("Tahoma", 10, "bold"), padding=(10, 8))
-        style.configure("TLabelframe.Label", font=("Tahoma", 10, "bold"), foreground="#2E5395")
-        style.configure("TButton", padding=(10, 6))
-        style.configure("Treeview", rowheight=26, font=base_font)
-        style.configure("Treeview.Heading", font=("Tahoma", 10, "bold"))
-
-        style.configure("Accent.TButton", font=("Tahoma", 10, "bold"), foreground="#000000")
-        style.map(
-            "Accent.TButton",
-            background=[("disabled", "#B7C2D6"), ("!disabled", "#2E5395"), ("active", "#1F3A6E")],
-            foreground=[("disabled", "#333333"), ("!disabled", "#000000"), ("active", "#000000")],
-        )
-
-        style.configure("Danger.TButton", font=("Tahoma", 10, "bold"))
-        style.map("Danger.TButton", foreground=[("disabled", "#B0B0B0"), ("!disabled", "#C62828")])
-
-        style.configure("Header.TLabel", font=header_font, foreground="#1F3A6E")
-        style.configure("FieldLabel.TLabel", font=("Tahoma", 10, "bold"))
-        style.configure("Muted.TLabel", foreground="#666666")
-        style.configure("Card.TFrame", background="#F4F6FA", relief="flat")
-
-        style.configure("StatusOk.TLabel", foreground="#2E7D32", font=("Tahoma", 10, "bold"))
-        style.configure("StatusBad.TLabel", foreground="#C62828", font=("Tahoma", 10, "bold"))
-        style.configure("StatusWarn.TLabel", foreground="#B36B00", font=("Tahoma", 10, "bold"))
+    def show_page(self, index):
+        for page in self.pages:
+            page.pack_forget()
+        self.pages[index].pack(fill="both", expand=True)
 
     def _build_menu(self):
         menubar = tk.Menu(self)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="สำรองข้อมูล (Backup)...", command=self._backup_database)
+        file_menu.add_command(label="สำรองข้อมูล (Backup)...  Ctrl+B", command=self._backup_database)
         file_menu.add_command(label="กู้คืนข้อมูลจากไฟล์สำรอง (Restore)...", command=self._restore_database)
         file_menu.add_separator()
         file_menu.add_command(label="ออกจากโปรแกรม", command=self._on_close)
         menubar.add_cascade(label="ไฟล์", menu=file_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label=f"เกี่ยวกับ (v{APP_VERSION})", command=self._show_about)
+        menubar.add_cascade(label="ช่วยเหลือ", menu=help_menu)
+
         self.config(menu=menubar)
+
+    def _show_about(self):
+        messagebox.showinfo(
+            "เกี่ยวกับระบบ",
+            f"ระบบเช็คชื่อเข้าร่วมกิจกรรมด้วยใบหน้า\n"
+            f"Enterprise Edition v{APP_VERSION}\n\n"
+            f"เทคโนโลยี: InsightFace + ONNX Runtime\n"
+            f"UI Framework: CustomTkinter\n\n"
+            f"วิทยาลัยการอาชีพจอมทอง"
+        )
+
+    def _update_clock(self):
+        now = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M:%S")
+        self.lbl_clock.configure(text=now)
+        self.after(1000, self._update_clock)
+
+    def _refresh_current(self):
+        """F5 — รีเฟรชหน้าปัจจุบัน"""
+        idx = self.sidebar.active_index
+        if idx == 0:
+            self.student_tab._refresh_student_list()
+        elif idx == 1:
+            self.event_tab._refresh()
+        elif idx == 3:
+            self.report_tab._load_report()
+        self.toast.show("รีเฟรชข้อมูลแล้ว", "info", duration=1500)
 
     def _backup_database(self):
         default_name = f"attendance_backup_{datetime.date.today().isoformat()}.db"
@@ -1195,6 +1686,7 @@ class App(tk.Tk):
             "ไฟล์นี้มีข้อมูลนักเรียน, ใบหน้าที่ลงทะเบียน, กิจกรรม และประวัติเช็คชื่อทั้งหมด\n"
             "แนะนำให้เก็บสำเนาไว้ในที่ปลอดภัย (USB, Google Drive) แยกจากเครื่องนี้",
         )
+        self.toast.show("สำรองข้อมูลสำเร็จ ✓", "success")
 
     def _restore_database(self):
         path = filedialog.askopenfilename(
@@ -1234,14 +1726,20 @@ class App(tk.Tk):
         self.report_tab.refresh_event_list()
 
         messagebox.showinfo("กู้คืนข้อมูลสำเร็จ", "กู้คืนข้อมูลจากไฟล์สำรองเรียบร้อยแล้ว")
+        self.toast.show("กู้คืนข้อมูลสำเร็จ ✓", "success")
 
     def _on_model_ready(self, engine):
         self.engine = engine
         self.refresh_matcher()
-        self.status_bar.config(text="  ✓ โหลดโมเดลสำเร็จ พร้อมใช้งาน", style="StatusOk.TLabel")
+        self.lbl_model_status.configure(
+            text="  ✓ โมเดลพร้อมใช้งาน", text_color=SUCCESS_COLOR
+        )
+        self.toast.show("โหลดโมเดล AI สำเร็จ — พร้อมสแกนใบหน้า", "success", duration=4000)
 
     def _on_model_error(self, err):
-        self.status_bar.config(text=f"  ✗ โหลดโมเดลล้มเหลว: {err}", style="StatusBad.TLabel")
+        self.lbl_model_status.configure(
+            text=f"  ✗ โหลดโมเดลล้มเหลว: {err}", text_color=DANGER_COLOR
+        )
         messagebox.showerror(
             "โหลดโมเดลล้มเหลว",
             f"ไม่สามารถโหลดโมเดล InsightFace ได้:\n{err}\n\n"
